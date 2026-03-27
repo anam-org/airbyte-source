@@ -21,6 +21,17 @@ const (
 	LOG               = "LOG"
 	CONNECTION_STATUS = "CONNECTION_STATUS"
 	CATALOG           = "CATALOG"
+	TRACE             = "TRACE"
+)
+
+const (
+	TRACE_TYPE_STREAM_STATUS = "STREAM_STATUS"
+)
+
+const (
+	STREAM_STATUS_STARTED    = "STARTED"
+	STREAM_STATUS_COMPLETE   = "COMPLETE"
+	STREAM_STATUS_INCOMPLETE = "INCOMPLETE"
 )
 
 const (
@@ -389,13 +400,30 @@ type AirbyteState struct {
 	Data SyncState `json:"data"`
 }
 
+type StreamDescriptor struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+}
+
+type AirbyteStreamStatus struct {
+	StreamDescriptor StreamDescriptor `json:"stream_descriptor"`
+	Status           string           `json:"status"`
+}
+
+type AirbyteTraceMessage struct {
+	Type         string               `json:"type"`
+	EmittedAt    float64              `json:"emitted_at"`
+	StreamStatus *AirbyteStreamStatus `json:"stream_status,omitempty"`
+}
+
 type AirbyteMessage struct {
-	Type             string             `json:"type"`
-	Log              *AirbyteLogMessage `json:"log,omitempty"`
-	ConnectionStatus *ConnectionStatus  `json:"connectionStatus,omitempty"`
-	Catalog          *Catalog           `json:"catalog,omitempty"`
-	Record           *AirbyteRecord     `json:"record,omitempty"`
-	State            *AirbyteState      `json:"state,omitempty"`
+	Type             string               `json:"type"`
+	Log              *AirbyteLogMessage   `json:"log,omitempty"`
+	ConnectionStatus *ConnectionStatus    `json:"connectionStatus,omitempty"`
+	Catalog          *Catalog             `json:"catalog,omitempty"`
+	Record           *AirbyteRecord       `json:"record,omitempty"`
+	State            *AirbyteState        `json:"state,omitempty"`
+	Trace            *AirbyteTraceMessage `json:"trace,omitempty"`
 }
 
 // A map of starting GTIDs for every keyspace and shard

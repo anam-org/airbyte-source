@@ -60,6 +60,10 @@ func (testAirbyteLogger) Error(error string) {
 	panic("implement me")
 }
 
+func (testAirbyteLogger) StreamStatus(namespace, streamName, status string) {
+	// no-op for tests
+}
+
 type vstreamClientMock struct {
 	vstreamFn             func(ctx context.Context, in *vtgate.VStreamRequest, opts ...grpc.CallOption) (vtgateservice.Vitess_VStreamClient, error)
 	vstreamFnInvoked      bool
