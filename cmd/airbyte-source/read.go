@@ -163,9 +163,26 @@ func readState(state string, psc internal.PlanetScaleSource, streams []internal.
 		Streams: map[string]internal.ShardStates{},
 	}
 	if state != "" {
-		err := json.Unmarshal([]byte(state), &syncState)
-		if err != nil {
-			return syncState, err
+		// Try parsing as Airbyte v2 per-stream state array first
+		var perStreamStates []internal.AirbyteState
+		if err := json.Unmarshal([]byte(state), &perStreamStates); err == nil && len(perStreamStates) > 0 && perStreamStates[0].Type == internal.STATE_TYPE_STREAM {
+			logger.Log(internal.LOGLEVEL_INFO, fmt.Sprintf("Parsing Airbyte v2 per-stream state (%d streams)", len(perStreamStates)))
+			for _, s := range perStreamStates {
+				if s.Stream != nil && s.Stream.StreamState != nil {
+					ns := s.Stream.StreamDescriptor.Namespace
+					if ns == "" {
+						ns = psc.Database
+					}
+					key := ns + ":" + s.Stream.StreamDescriptor.Name
+					syncState.Streams[key] = *s.Stream.StreamState
+				}
+			}
+		} else {
+			// Fall back to legacy global state format
+			err := json.Unmarshal([]byte(state), &syncState)
+			if err != nil {
+				return syncState, err
+			}
 		}
 	}
 
