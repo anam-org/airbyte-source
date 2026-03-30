@@ -169,7 +169,11 @@ func readState(state string, psc internal.PlanetScaleSource, streams []internal.
 			logger.Log(internal.LOGLEVEL_INFO, fmt.Sprintf("Parsing Airbyte v2 per-stream state (%d streams)", len(perStreamStates)))
 			for _, s := range perStreamStates {
 				if s.Stream != nil && s.Stream.StreamState != nil {
-					key := s.Stream.StreamDescriptor.Namespace + ":" + s.Stream.StreamDescriptor.Name
+					ns := s.Stream.StreamDescriptor.Namespace
+					if ns == "" {
+						ns = psc.Database
+					}
+					key := ns + ":" + s.Stream.StreamDescriptor.Name
 					syncState.Streams[key] = *s.Stream.StreamState
 				}
 			}
