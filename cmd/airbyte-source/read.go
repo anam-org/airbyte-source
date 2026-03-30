@@ -139,10 +139,10 @@ func ReadCommand(ch *Helper) *cobra.Command {
 					if sc != nil {
 						syncState.Streams[streamStateKey].Shards[shardName] = sc
 					}
-					ch.Logger.State(syncState)
 				}
 
 				if !streamFailed {
+					ch.Logger.StreamState(keyspaceOrDatabase, configuredStream.Stream.Name, syncState.Streams[streamStateKey])
 					ch.Logger.StreamStatus(keyspaceOrDatabase, configuredStream.Stream.Name, internal.STREAM_STATUS_COMPLETE)
 				}
 			}

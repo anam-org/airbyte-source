@@ -396,8 +396,18 @@ func mapEnumValue(value sqltypes.Value, values []string) sqltypes.Value {
 	return value
 }
 
+const (
+	STATE_TYPE_STREAM = "STREAM"
+)
+
+type AirbyteStreamState struct {
+	StreamDescriptor StreamDescriptor `json:"stream_descriptor"`
+	StreamState      *ShardStates     `json:"stream_state"`
+}
+
 type AirbyteState struct {
-	Data SyncState `json:"data"`
+	Type   string               `json:"type"`
+	Stream *AirbyteStreamState  `json:"stream,omitempty"`
 }
 
 type StreamDescriptor struct {

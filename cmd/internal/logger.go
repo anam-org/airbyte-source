@@ -14,7 +14,7 @@ type AirbyteLogger interface {
 	ConnectionStatus(status ConnectionStatus)
 	Record(tableNamespace, tableName string, data map[string]interface{})
 	Flush()
-	State(syncState SyncState)
+	StreamState(namespace, streamName string, shardStates ShardStates)
 	Error(error string)
 	StreamStatus(namespace, streamName, status string)
 }
@@ -83,10 +83,19 @@ func (a *airbyteLogger) Flush() {
 	a.records = a.records[:0]
 }
 
-func (a *airbyteLogger) State(syncState SyncState) {
+func (a *airbyteLogger) StreamState(namespace, streamName string, shardStates ShardStates) {
 	if err := a.recordEncoder.Encode(AirbyteMessage{
-		Type:  STATE,
-		State: &AirbyteState{syncState},
+		Type: STATE,
+		State: &AirbyteState{
+			Type: STATE_TYPE_STREAM,
+			Stream: &AirbyteStreamState{
+				StreamDescriptor: StreamDescriptor{
+					Name:      streamName,
+					Namespace: namespace,
+				},
+				StreamState: &shardStates,
+			},
+		},
 	}); err != nil {
 		a.Error(fmt.Sprintf("state encoding error: %v", err))
 	}
