@@ -145,10 +145,6 @@ func ReadCommand(ch *Helper) *cobra.Command {
 					ch.Logger.StreamState(keyspaceOrDatabase, configuredStream.Stream.Name, syncState.Streams[streamStateKey])
 					ch.Logger.StreamStatus(keyspaceOrDatabase, configuredStream.Stream.Name, internal.STREAM_STATUS_COMPLETE)
 				}
-
-				if !streamFailed {
-					ch.Logger.StreamStatus(keyspaceOrDatabase, configuredStream.Stream.Name, internal.STREAM_STATUS_COMPLETE)
-				}
 			}
 		},
 	}
