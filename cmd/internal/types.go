@@ -426,22 +426,6 @@ type AirbyteTraceMessage struct {
 	StreamStatus *AirbyteStreamStatus `json:"stream_status,omitempty"`
 }
 
-type StreamDescriptor struct {
-	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
-}
-
-type AirbyteStreamStatus struct {
-	StreamDescriptor StreamDescriptor `json:"stream_descriptor"`
-	Status           string           `json:"status"`
-}
-
-type AirbyteTraceMessage struct {
-	Type         string               `json:"type"`
-	EmittedAt    float64              `json:"emitted_at"`
-	StreamStatus *AirbyteStreamStatus `json:"stream_status,omitempty"`
-}
-
 type AirbyteMessage struct {
 	Type             string               `json:"type"`
 	Log              *AirbyteLogMessage   `json:"log,omitempty"`
