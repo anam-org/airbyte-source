@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"vitess.io/vitess/go/vt/proto/binlogdata"
+	"vitess.io/vitess/go/vt/proto/query"
 	"vitess.io/vitess/go/vt/proto/vtgate"
 	"vitess.io/vitess/go/vt/proto/vtgateservice"
 )
@@ -45,4 +46,29 @@ func TestOrderedSyncAcrossPacketsAndInterruptedCommit(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestOrderedReadResumesCopyWithoutNewTransactions(t *testing.T) {
+	b := &bytes.Buffer{}
+	ped := PlanetScaleEdgeDatabase{Logger: NewLogger(b)}
+	firstPK := &query.QueryResult{Rows: []*query.Row{{Lengths: []int64{1}, Values: []byte("0")}}}
+	nextPK := &query.QueryResult{Rows: []*query.Row{{Lengths: []int64{1}, Values: []byte("1")}}}
+	calls := 0
+	vsc := &vstreamClientMock{vstreamFn: func(_ context.Context, req *vtgate.VStreamRequest, _ ...grpc.CallOption) (vtgateservice.Vitess_VStreamClient, error) {
+		calls++
+		events := []*binlogdata.VEvent{vgtid(10, nil)}
+		if calls > 1 {
+			require.Equal(t, pos(10), req.Vgtid.ShardGtids[0].Gtid)
+			require.NotEmpty(t, req.Vgtid.ShardGtids[0].TablePKs)
+			events = []*binlogdata.VEvent{fields(), row("remaining"), vgtid(10, nextPK), commitEvent(), vgtid(10, nil), {Type: binlogdata.VEventType_COPY_COMPLETED}}
+		}
+		return &vtgateVStreamClientMock{vstreamResponses: []*vstreamResponse{{response: &vtgate.VStreamResponse{Events: events}}}}, nil
+	}}
+	ped.vtgateClientFn = func(context.Context, PlanetScaleSource) (vtgateservice.VitessClient, error) { return vsc, nil }
+	tc := &psdbconnect.TableCursor{Keyspace: "db", Shard: "-", Position: pos(10), LastKnownPk: firstPK}
+	_, err := ped.Read(context.Background(), b, PlanetScaleSource{OrderedCDC: true}, ConfiguredStream{Stream: Stream{Name: "users", Namespace: "db"}, SyncMode: "incremental"}, tc)
+	require.NoError(t, err)
+	require.Equal(t, 2, calls, "same GTID must not skip unfinished snapshot")
+	require.Len(t, decodeRecords(t, b), 1)
+	require.Nil(t, tc.LastKnownPk)
 }

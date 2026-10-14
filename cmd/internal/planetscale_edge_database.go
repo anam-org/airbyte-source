@@ -257,7 +257,7 @@ func (p PlanetScaleEdgeDatabase) Read(ctx context.Context, w io.Writer, ps Plane
 	}
 
 	// the last synced VGTID is not after the current VGTID
-	if currentPosition.Position != "" && !positionAfter(stopPosition, currentPosition.Position) {
+	if currentPosition.Position != "" && (!ps.OrderedCDC || currentPosition.LastKnownPk == nil) && !positionAfter(stopPosition, currentPosition.Position) {
 		p.Logger.Log(LOGLEVEL_INFO, preamble+"No new GTIDs found, exiting")
 		return TableCursorToSerializedCursor(currentPosition)
 	}
