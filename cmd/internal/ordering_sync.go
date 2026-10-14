@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -37,7 +38,10 @@ func (p PlanetScaleEdgeDatabase) syncOrdered(ctx context.Context, mode string, t
 		response, err := c.Recv()
 		if err != nil {
 			if len(tx.rows) > 0 {
-				return tc, tx.count, fmt.Errorf("VStream ended inside a transaction; committed checkpoint retained: %v", err)
+				if errors.Is(err, io.EOF) {
+					err = io.ErrUnexpectedEOF
+				}
+				return tc, tx.count, fmt.Errorf("VStream ended inside a transaction; committed checkpoint retained: %w", err)
 			}
 			return tc, tx.count, err
 		}

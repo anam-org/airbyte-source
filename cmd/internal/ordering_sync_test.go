@@ -10,6 +10,8 @@ import (
 	psdbconnect "github.com/planetscale/airbyte-source/proto/psdbconnect/v1alpha1"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"vitess.io/vitess/go/vt/proto/binlogdata"
 	"vitess.io/vitess/go/vt/proto/query"
 	"vitess.io/vitess/go/vt/proto/vtgate"
@@ -113,4 +115,34 @@ func TestOrderedReadChecksStopPositionBeforeQuietExit(t *testing.T) {
 			require.Empty(t, decodeRecords(t, b))
 		})
 	}
+}
+
+func TestOrderedReadRetriesInterruptedDeadlineFromCommittedCheckpoint(t *testing.T) {
+	b := &bytes.Buffer{}
+	ped := PlanetScaleEdgeDatabase{Logger: NewLogger(b)}
+	calls := 0
+	vsc := &vstreamClientMock{vstreamFn: func(_ context.Context, req *vtgate.VStreamRequest, _ ...grpc.CallOption) (vtgateservice.Vitess_VStreamClient, error) {
+		calls++
+		if calls == 1 {
+			return &vtgateVStreamClientMock{vstreamResponses: []*vstreamResponse{{response: &vtgate.VStreamResponse{Events: []*binlogdata.VEvent{vgtid(11, nil)}}}}}, nil
+		}
+		require.Equal(t, pos(10), req.Vgtid.ShardGtids[0].Gtid, "retry must retain the committed checkpoint")
+		events := []*binlogdata.VEvent{fields(), row("latest"), vgtid(11, nil)}
+		if calls == 2 {
+			return &vtgateVStreamClientMock{vstreamResponses: []*vstreamResponse{
+				{response: &vtgate.VStreamResponse{Events: events}},
+				{err: status.Error(codes.DeadlineExceeded, "deadline")},
+			}}, nil
+		}
+		require.Equal(t, 3, calls)
+		events = append(events, commitEvent())
+		return &vtgateVStreamClientMock{vstreamResponses: []*vstreamResponse{{response: &vtgate.VStreamResponse{Events: events}}}}, nil
+	}}
+	ped.vtgateClientFn = func(context.Context, PlanetScaleSource) (vtgateservice.VitessClient, error) { return vsc, nil }
+	tc := &psdbconnect.TableCursor{Keyspace: "db", Shard: "-", Position: pos(10)}
+	_, err := ped.Read(context.Background(), b, PlanetScaleSource{OrderedCDC: true, MaxRetries: 3}, ConfiguredStream{Stream: Stream{Name: "users", Namespace: "db"}, SyncMode: "incremental"}, tc)
+	require.NoError(t, err)
+	require.Equal(t, 3, calls)
+	require.Equal(t, pos(11), tc.Position)
+	require.Len(t, decodeRecords(t, b), 1, "discarded uncommitted rows must not be emitted twice")
 }
