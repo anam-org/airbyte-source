@@ -120,6 +120,12 @@
               }
             }
           ]
+        },
+        "ordered_cdc": {
+          "type": "boolean",
+          "default": false,
+          "title": "Deterministic CDC ordering",
+          "description": "Emit _planetscale_order from committed MySQL56 transaction positions and row ordinals. Select this field as the destination cursor. Supports only an unsharded database; fails on divergent histories or transactions above 64 MiB. Preserve acknowledged VStream state when enabling."
         }
       }
     }

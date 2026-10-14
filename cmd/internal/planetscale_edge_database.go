@@ -130,6 +130,13 @@ func (p PlanetScaleEdgeDatabase) getStreamForTable(ctx context.Context, psc Plan
 		stream.DefaultCursorFields = append(stream.DefaultCursorFields, primaryKeys[len(primaryKeys)-1])
 	}
 
+	if psc.OrderedCDC {
+		if _, exists := stream.Schema.Properties[orderingField]; exists {
+			return stream, fmt.Errorf("reserved ordering column already exists")
+		}
+		stream.Schema.Properties[orderingField] = PropertyType{Type: []string{"string"}}
+		stream.DefaultCursorFields = []string{orderingField}
+	}
 	stream.SourceDefinedCursor = true
 	return stream, nil
 }
@@ -289,6 +296,9 @@ func (p PlanetScaleEdgeDatabase) Read(ctx context.Context, w io.Writer, ps Plane
 }
 
 func (p PlanetScaleEdgeDatabase) sync(ctx context.Context, syncMode string, tc *psdbconnect.TableCursor, stopPosition string, s Stream, ps PlanetScaleSource, tabletType psdbconnect.TabletType, timeout time.Duration) (*psdbconnect.TableCursor, int, error) {
+	if ps.OrderedCDC {
+		return p.syncOrdered(ctx, syncMode, tc, stopPosition, s, ps, tabletType, timeout)
+	}
 	preamble := fmt.Sprintf("[%v:%v:%v shard : %v] ", s.Namespace, TabletTypeToString(tabletType), s.Name, tc.Shard)
 
 	defer p.Logger.Flush()
