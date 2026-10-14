@@ -176,3 +176,23 @@ func (o *orderedTransaction) commit() error {
 	o.bytes = 0
 	return nil
 }
+
+// A lagging replica may have an older comparable position. An unrelated history
+// must not be mistaken for an idle source by the no-new-GTIDs fast path.
+func validateOrderingTarget(current, target string) error {
+	if _, err := transactionRank(target); err != nil {
+		return fmt.Errorf("invalid ordering target: %w", err)
+	}
+	if current == "" {
+		return nil
+	}
+	if _, err := transactionRank(current); err != nil {
+		return fmt.Errorf("invalid committed ordering position: %w", err)
+	}
+	previous, _ := vtmysql.DecodePosition(current)
+	next, _ := vtmysql.DecodePosition(target)
+	if !next.AtLeast(previous) && !previous.AtLeast(next) {
+		return fmt.Errorf("stop cursor history diverged from committed checkpoint")
+	}
+	return nil
+}

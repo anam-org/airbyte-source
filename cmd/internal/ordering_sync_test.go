@@ -72,3 +72,45 @@ func TestOrderedReadResumesCopyWithoutNewTransactions(t *testing.T) {
 	require.Len(t, decodeRecords(t, b), 1)
 	require.Nil(t, tc.LastKnownPk)
 }
+
+func TestOrderedReadChecksStopPositionBeforeQuietExit(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		position  string
+		streamErr error
+		wantError bool
+	}{
+		{name: "unavailable", streamErr: io.ErrUnexpectedEOF, wantError: true},
+		{name: "empty", position: "", wantError: true},
+		{name: "invalid", position: "invalid", wantError: true},
+		{name: "divergent", position: "MySQL56/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:1-10", wantError: true},
+		{name: "equal", position: pos(10)},
+		{name: "replica behind", position: pos(9)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			b := &bytes.Buffer{}
+			ped := PlanetScaleEdgeDatabase{Logger: NewLogger(b)}
+			calls := 0
+			vsc := &vstreamClientMock{vstreamFn: func(context.Context, *vtgate.VStreamRequest, ...grpc.CallOption) (vtgateservice.Vitess_VStreamClient, error) {
+				calls++
+				if test.streamErr != nil {
+					return nil, test.streamErr
+				}
+				event := vgtid(10, nil)
+				event.Vgtid.ShardGtids[0].Gtid = test.position
+				return &vtgateVStreamClientMock{vstreamResponses: []*vstreamResponse{{response: &vtgate.VStreamResponse{Events: []*binlogdata.VEvent{event}}}}}, nil
+			}}
+			ped.vtgateClientFn = func(context.Context, PlanetScaleSource) (vtgateservice.VitessClient, error) { return vsc, nil }
+			tc := &psdbconnect.TableCursor{Keyspace: "db", Shard: "-", Position: pos(10)}
+			_, err := ped.Read(context.Background(), b, PlanetScaleSource{OrderedCDC: true}, ConfiguredStream{Stream: Stream{Name: "users", Namespace: "db"}, SyncMode: "incremental"}, tc)
+			if test.wantError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, 1, calls)
+			require.Equal(t, pos(10), tc.Position)
+			require.Empty(t, decodeRecords(t, b))
+		})
+	}
+}
