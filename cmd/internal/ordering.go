@@ -99,8 +99,8 @@ func (o *orderedTransaction) accept(event *binlogdata.VEvent) error {
 		if _, err := transactionRank(shard.Gtid); err != nil {
 			return err
 		}
-		if o.committed.Position != "" {
-			previous, err := vtmysql.DecodePosition(o.committed.Position)
+		if o.pending.Position != "" {
+			previous, err := vtmysql.DecodePosition(o.pending.Position)
 			if err != nil {
 				return err
 			}

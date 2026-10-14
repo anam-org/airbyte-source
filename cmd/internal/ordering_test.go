@@ -197,3 +197,11 @@ func (orderingSchemaMock) GetTableSchema(context.Context, PlanetScaleSource, str
 func (orderingSchemaMock) GetTablePrimaryKeys(context.Context, PlanetScaleSource, string) ([]string, error) {
 	return []string{"id"}, nil
 }
+
+func TestOrderingRejectsRegressionBeforeCommit(t *testing.T) {
+	b := &bytes.Buffer{}
+	tx := testTransaction(b, 10)
+	require.NoError(t, tx.accept(vgtid(12, nil)))
+	require.Error(t, tx.accept(vgtid(11, nil)))
+	require.Equal(t, pos(10), tx.committed.Position)
+}
