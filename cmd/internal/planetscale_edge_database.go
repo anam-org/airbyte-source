@@ -130,6 +130,13 @@ func (p PlanetScaleEdgeDatabase) getStreamForTable(ctx context.Context, psc Plan
 		stream.DefaultCursorFields = append(stream.DefaultCursorFields, primaryKeys[len(primaryKeys)-1])
 	}
 
+	if psc.OrderedCDC {
+		if _, exists := stream.Schema.Properties[orderingField]; exists {
+			return stream, fmt.Errorf("reserved ordering column already exists")
+		}
+		stream.Schema.Properties[orderingField] = PropertyType{Type: []string{"string"}}
+		stream.DefaultCursorFields = []string{orderingField}
+	}
 	stream.SourceDefinedCursor = true
 	return stream, nil
 }
@@ -209,7 +216,6 @@ func (p PlanetScaleEdgeDatabase) ListShards(ctx context.Context, psc PlanetScale
 // 5. End the stream when (a) a vgtid newer than latest vgtid is encountered or (b) the timeout kicks in.
 func (p PlanetScaleEdgeDatabase) Read(ctx context.Context, w io.Writer, ps PlanetScaleSource, s ConfiguredStream, lastKnownPosition *psdbconnect.TableCursor) (*SerializedCursor, error) {
 	var (
-		err                     error
 		sErr                    error
 		currentSerializedCursor *SerializedCursor
 		syncMode                string
@@ -242,15 +248,21 @@ func (p PlanetScaleEdgeDatabase) Read(ctx context.Context, w io.Writer, ps Plane
 	stopPosition, lcErr := p.getStopCursorPosition(ctx, currentPosition.Shard, currentPosition.Keyspace, table, ps, tabletType)
 	if lcErr != nil {
 		p.Logger.Log(LOGLEVEL_ERROR, preamble+fmt.Sprintf("Error fetching latest cursor position: %+v", lcErr))
-		return currentSerializedCursor, errors.Wrap(err, "Unable to get latest cursor position")
+		return currentSerializedCursor, errors.Wrap(lcErr, "unable to get latest cursor position")
 	}
 	if stopPosition == "" {
 		p.Logger.Log(LOGLEVEL_ERROR, preamble+fmt.Sprintf("Error fetching latest cursor position, was empty string: %+v", stopPosition))
-		return currentSerializedCursor, errors.Wrap(err, "Unable to get latest cursor position")
+		return currentSerializedCursor, errors.New("latest cursor position was empty")
+	}
+
+	if ps.OrderedCDC {
+		if err := validateOrderingTarget(currentPosition.Position, stopPosition); err != nil {
+			return currentSerializedCursor, err
+		}
 	}
 
 	// the last synced VGTID is not after the current VGTID
-	if currentPosition.Position != "" && !positionAfter(stopPosition, currentPosition.Position) {
+	if currentPosition.Position != "" && (!ps.OrderedCDC || currentPosition.LastKnownPk == nil) && !positionAfter(stopPosition, currentPosition.Position) {
 		p.Logger.Log(LOGLEVEL_INFO, preamble+"No new GTIDs found, exiting")
 		return TableCursorToSerializedCursor(currentPosition)
 	}
@@ -289,6 +301,9 @@ func (p PlanetScaleEdgeDatabase) Read(ctx context.Context, w io.Writer, ps Plane
 }
 
 func (p PlanetScaleEdgeDatabase) sync(ctx context.Context, syncMode string, tc *psdbconnect.TableCursor, stopPosition string, s Stream, ps PlanetScaleSource, tabletType psdbconnect.TabletType, timeout time.Duration) (*psdbconnect.TableCursor, int, error) {
+	if ps.OrderedCDC {
+		return p.syncOrdered(ctx, syncMode, tc, stopPosition, s, ps, tabletType, timeout)
+	}
 	preamble := fmt.Sprintf("[%v:%v:%v shard : %v] ", s.Namespace, TabletTypeToString(tabletType), s.Name, tc.Shard)
 
 	defer p.Logger.Flush()
@@ -483,7 +498,7 @@ func (p PlanetScaleEdgeDatabase) getStopCursorPosition(ctx context.Context, shar
 	vtgateCursor, vtgateErr := vtgateClient.VStream(ctx, vtgateReq)
 
 	if vtgateErr != nil {
-		return "", nil
+		return "", vtgateErr
 	}
 
 	for {
