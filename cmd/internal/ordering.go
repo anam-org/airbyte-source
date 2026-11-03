@@ -16,6 +16,10 @@ import (
 )
 
 const orderingField = "_planetscale_order"
+
+// Airbyte's CDC deletion marker. In append-dedup mode the destination deletes the
+// row whose primary key a record carrying this field names.
+const deletedAtField = "_ab_cdc_deleted_at"
 const maxOrderedTransactionBytes = 64 << 20
 
 // GTID set cardinality increases along one shard's replication history, including
@@ -50,11 +54,18 @@ func transactionRank(position string) (uint64, error) {
 	return count, nil
 }
 
+// A row version held until its transaction commits. deletedAt is set for a
+// hard delete, whose row is the before-image.
+type orderedRow struct {
+	result    *query.QueryResult
+	deletedAt string
+}
+
 type orderedTransaction struct {
 	committed *psdbconnect.TableCursor
 	pending   *psdbconnect.TableCursor
 	fields    []*query.Field
-	rows      []*query.QueryResult
+	rows      []orderedRow
 	bytes     int
 	logger    AirbyteLogger
 	source    PlanetScaleSource
@@ -85,7 +96,12 @@ func (o *orderedTransaction) accept(event *binlogdata.VEvent) error {
 		}
 		for _, change := range event.RowEvent.RowChanges {
 			if change.After != nil {
-				o.rows = append(o.rows, &query.QueryResult{Fields: o.fields, Rows: []*query.Row{change.After}})
+				o.rows = append(o.rows, orderedRow{result: &query.QueryResult{Fields: o.fields, Rows: []*query.Row{change.After}}})
+			} else if change.Before != nil && o.source.PropagatesDeletes(o.stream.Name) {
+				o.rows = append(o.rows, orderedRow{
+					result:    &query.QueryResult{Fields: o.fields, Rows: []*query.Row{change.Before}},
+					deletedAt: eventTime(event).UTC().Format(time.RFC3339Nano),
+				})
 			}
 		}
 	case binlogdata.VEventType_VGTID:
@@ -151,7 +167,7 @@ func (o *orderedTransaction) commit() error {
 	if len(o.rows) > 0 && !snapshotChunk && o.pending.Position == o.committed.Position {
 		return fmt.Errorf("CDC rows have no advancing committed GTID")
 	}
-	for i, qr := range o.rows {
+	for i, r := range o.rows {
 		phase := 0
 		ordinal := i + 1
 		// A snapshot represents the state after all transactions in its GTID set.
@@ -160,7 +176,13 @@ func (o *orderedTransaction) commit() error {
 			phase = 1
 			ordinal = 0
 		}
-		for _, record := range QueryResultToRecords(sqltypes.Proto3ToResult(qr), &o.source) {
+		for _, record := range QueryResultToRecords(sqltypes.Proto3ToResult(r.result), &o.source) {
+			if r.deletedAt != "" {
+				var err error
+				if record, err = deletionRecord(record, o.stream, r.deletedAt); err != nil {
+					return err
+				}
+			}
 			record[orderingField] = fmt.Sprintf("%020d:%d:%020d", rank, phase, ordinal)
 			if o.source.IncludeMetadata {
 				record["_planetscale_metadata"] = map[string]interface{}{"vgtid_position": o.pending.Position, "extracted_at": time.Now().UnixNano(), "sequence_number": i + 1}
@@ -175,6 +197,45 @@ func (o *orderedTransaction) commit() error {
 	o.rows = nil
 	o.bytes = 0
 	return nil
+}
+
+// Deletes need ordered CDC: the deletion must sort after every earlier version of
+// its row in the destination's dedup, and only _planetscale_order guarantees that.
+func validateDeletePropagation(psc PlanetScaleSource, table string) error {
+	if !psc.OrderedCDC {
+		return fmt.Errorf("delete propagation for %s requires ordered_cdc", table)
+	}
+	return nil
+}
+
+// The commit time of the binlog event, falling back to the read time for events
+// that carry none.
+func eventTime(event *binlogdata.VEvent) time.Time {
+	if event.Timestamp > 0 {
+		return time.Unix(event.Timestamp, 0)
+	}
+	return time.Now()
+}
+
+// A deletion carries only the primary key and the marker. The before-image's
+// other columns are dropped so deleted content is not sent to the destination
+// again.
+func deletionRecord(row map[string]interface{}, stream Stream, deletedAt string) (map[string]interface{}, error) {
+	if len(stream.PrimaryKeys) == 0 {
+		return nil, fmt.Errorf("cannot propagate a delete from %s: the stream has no primary key", stream.Name)
+	}
+	record := map[string]interface{}{deletedAtField: deletedAt}
+	for _, key := range stream.PrimaryKeys {
+		if len(key) != 1 {
+			return nil, fmt.Errorf("cannot propagate a delete from %s: nested primary key %v", stream.Name, key)
+		}
+		value, ok := row[key[0]]
+		if !ok || value == nil {
+			return nil, fmt.Errorf("cannot propagate a delete from %s: before-image lacks primary key %s", stream.Name, key[0])
+		}
+		record[key[0]] = value
+	}
+	return record, nil
 }
 
 // A lagging replica may have an older comparable position. An unrelated history
