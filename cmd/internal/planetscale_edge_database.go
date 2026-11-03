@@ -137,6 +137,19 @@ func (p PlanetScaleEdgeDatabase) getStreamForTable(ctx context.Context, psc Plan
 		stream.Schema.Properties[orderingField] = PropertyType{Type: []string{"string"}}
 		stream.DefaultCursorFields = []string{orderingField}
 	}
+	if psc.PropagatesDeletes(tableName) {
+		if err := validateDeletePropagation(psc, tableName); err != nil {
+			return stream, err
+		}
+		if _, exists := stream.Schema.Properties[deletedAtField]; exists {
+			return stream, fmt.Errorf("reserved deletion column already exists")
+		}
+		stream.Schema.Properties[deletedAtField] = PropertyType{
+			Type:         []string{"null", "string"},
+			CustomFormat: "date-time",
+			AirbyteType:  "timestamp_with_timezone",
+		}
+	}
 	stream.SourceDefinedCursor = true
 	return stream, nil
 }
@@ -257,6 +270,11 @@ func (p PlanetScaleEdgeDatabase) Read(ctx context.Context, w io.Writer, ps Plane
 
 	if ps.OrderedCDC {
 		if err := validateOrderingTarget(currentPosition.Position, stopPosition); err != nil {
+			return currentSerializedCursor, err
+		}
+	}
+	if ps.PropagatesDeletes(table.Name) {
+		if err := validateDeletePropagation(ps, table.Name); err != nil {
 			return currentSerializedCursor, err
 		}
 	}

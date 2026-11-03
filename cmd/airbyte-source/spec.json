@@ -126,6 +126,12 @@
           "default": false,
           "title": "Deterministic CDC ordering",
           "description": "Emit _planetscale_order from committed MySQL56 transaction positions and row ordinals. Select this field as the destination cursor. Supports only an unsharded database; fails on divergent histories or transactions above 64 MiB. Preserve acknowledged VStream state when enabling."
+        },
+        "delete_propagation_tables": {
+          "type": "string",
+          "default": "",
+          "title": "Tables whose hard deletes are propagated",
+          "description": "Comma-separated table names. A hard delete in one of these tables is emitted as a record holding only the primary key and _ab_cdc_deleted_at, which an append-dedup destination applies as a delete. Other tables keep dropping deletes. Requires ordered_cdc; refresh the source schema after changing it so _ab_cdc_deleted_at is in the catalog."
         }
       }
     }
