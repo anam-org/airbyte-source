@@ -36,7 +36,7 @@ func DiscoverCommand(ch *Helper) *cobra.Command {
 				return
 			}
 
-			if err := ch.EnsureDB(psc); err != nil {
+			if err := ch.EnsureDB(psc.ForSchemaDiscovery()); err != nil {
 				fmt.Fprintln(cmd.OutOrStdout(), "Unable to connect to PlanetScale Database")
 				return
 			}

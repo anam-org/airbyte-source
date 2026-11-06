@@ -73,3 +73,52 @@ func TestDiscoverFailed(t *testing.T) {
 	assert.Equal(t, internal.LOGLEVEL_ERROR, amsg.Log.Level)
 	assert.Equal(t, "PlanetScale Source :: Unable to discover database, failed with [unable to get catalog for keyspace]", amsg.Log.Message)
 }
+
+// captureMySQLDSN replaces newMySQL for one test and records the DSN each
+// command connects with. It returns an error so the command stops after
+// EnsureDB.
+func captureMySQLDSN(t *testing.T) *[]string {
+	t.Helper()
+	// End-to-end mode drops the @tablet suffix from the DSN.
+	t.Setenv("PS_END_TO_END_TEST_RUN", "")
+	var dsns []string
+	orig := newMySQL
+	newMySQL = func(psc *internal.PlanetScaleSource) (internal.PlanetScaleEdgeMysqlAccess, error) {
+		dsns = append(dsns, psc.DSN())
+		return nil, fmt.Errorf("stop after capturing the DSN")
+	}
+	t.Cleanup(func() { newMySQL = orig })
+	return &dsns
+}
+
+const replicaSourceConfig = "{\"host\": \"something.us-east-3.psdb.cloud\",\"database\":\"database\",\"username\":\"username\",\"password\":\"password\",\"use_replica\":true}"
+
+func TestDiscoverConnectsToPrimaryWhenReplicaConfigured(t *testing.T) {
+	dsns := captureMySQLDSN(t)
+	b := bytes.NewBufferString("")
+	discover := DiscoverCommand(&Helper{
+		FileReader: testFileReader{content: []byte(replicaSourceConfig)},
+		Logger:     internal.NewLogger(b),
+	})
+	discover.SetOut(b)
+	require.NoError(t, discover.Flag("config").Value.Set("source.json"))
+	require.NoError(t, discover.Execute())
+
+	require.Len(t, *dsns, 1)
+	assert.Contains(t, (*dsns)[0], "/database@primary?")
+}
+
+func TestCheckKeepsConfiguredReplica(t *testing.T) {
+	dsns := captureMySQLDSN(t)
+	b := bytes.NewBufferString("")
+	check := CheckCommand(&Helper{
+		FileReader: testFileReader{content: []byte(replicaSourceConfig)},
+		Logger:     internal.NewLogger(b),
+	})
+	check.SetOut(b)
+	require.NoError(t, check.Flag("config").Value.Set("source.json"))
+	require.NoError(t, check.Execute())
+
+	require.Len(t, *dsns, 1)
+	assert.Contains(t, (*dsns)[0], "/database@replica?")
+}

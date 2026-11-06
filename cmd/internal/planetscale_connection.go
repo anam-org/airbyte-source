@@ -57,6 +57,18 @@ func (psc PlanetScaleSource) DSN() string {
 	return config.FormatDSN()
 }
 
+// ForSchemaDiscovery returns a copy of the source whose MySQL connection
+// targets the primary. Schema queries (show tables, information_schema) are
+// served by a tablet of the requested type in the region the host routes to.
+// A read-only region has only RDONLY tablets, so @replica fails there with
+// "no healthy tablet available". The primary is reachable from every region,
+// and these queries are cheap. Reads still use the configured tablet type.
+func (psc PlanetScaleSource) ForSchemaDiscovery() PlanetScaleSource {
+	psc.UseReplica = false
+	psc.UseRdonly = false
+	return psc
+}
+
 // GetInitialState will return the initial/blank state for a given keyspace in all of its shards.
 // This state can be round-tripped safely with Airbyte.
 func (psc PlanetScaleSource) GetInitialState(keyspaceOrDatabase string, shards []string) (ShardStates, error) {

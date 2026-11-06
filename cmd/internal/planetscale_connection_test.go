@@ -31,6 +31,21 @@ func TestCanGenerateInsecureDSN(t *testing.T) {
 	assert.Equal(t, "usernameus-east-4:pscale_password@tcp(useast.psdb.connect)/connect-test?tls=skip-verify", dsn)
 }
 
+func TestSchemaDiscoveryTargetsPrimary(t *testing.T) {
+	psc := PlanetScaleSource{
+		Host:       "useast.psdb.connect",
+		Username:   "usernameus-east-4",
+		Password:   "pscale_password",
+		Database:   "connect-test",
+		UseReplica: true,
+	}
+	assert.Equal(t, "usernameus-east-4:pscale_password@tcp(useast.psdb.connect)/connect-test@replica?tls=true", psc.DSN())
+
+	discovery := psc.ForSchemaDiscovery()
+	assert.Equal(t, "usernameus-east-4:pscale_password@tcp(useast.psdb.connect)/connect-test@primary?tls=true", discovery.DSN())
+	assert.True(t, psc.UseReplica, "reads keep the configured tablet type")
+}
+
 func TestCanGenerateInitialState_Sharded(t *testing.T) {
 	psc := PlanetScaleSource{
 		Host:     "useast.psdb.connect",

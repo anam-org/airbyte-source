@@ -31,12 +31,16 @@ func DefaultHelper(w io.Writer) *Helper {
 	}
 }
 
+// newMySQL opens the MySQL connection used by EnsureDB. Tests replace it to
+// see which source each command connects with.
+var newMySQL = internal.NewMySQL
+
 func (h *Helper) EnsureDB(psc internal.PlanetScaleSource) error {
 	if h.Database != nil {
 		return nil
 	}
 
-	mysql, err := internal.NewMySQL(&psc)
+	mysql, err := newMySQL(&psc)
 	if err != nil {
 		return err
 	}
