@@ -94,14 +94,27 @@ func (o *orderedTransaction) accept(event *binlogdata.VEvent) error {
 		if len(o.fields) == 0 {
 			return fmt.Errorf("row before field metadata")
 		}
+		propagates := o.source.PropagatesDeletes(o.stream.Name)
 		for _, change := range event.RowEvent.RowChanges {
+			deletion := orderedRow{
+				result:    &query.QueryResult{Fields: o.fields, Rows: []*query.Row{change.Before}},
+				deletedAt: eventTime(event).UTC().Format(time.RFC3339Nano),
+			}
 			if change.After != nil {
+				// An update that moves a row to a new primary key leaves the old key's
+				// row in the destination unless the old key is deleted first.
+				if propagates && change.Before != nil {
+					moved, err := o.keyChanged(change.Before, change.After)
+					if err != nil {
+						return err
+					}
+					if moved {
+						o.rows = append(o.rows, deletion)
+					}
+				}
 				o.rows = append(o.rows, orderedRow{result: &query.QueryResult{Fields: o.fields, Rows: []*query.Row{change.After}}})
-			} else if change.Before != nil && o.source.PropagatesDeletes(o.stream.Name) {
-				o.rows = append(o.rows, orderedRow{
-					result:    &query.QueryResult{Fields: o.fields, Rows: []*query.Row{change.Before}},
-					deletedAt: eventTime(event).UTC().Format(time.RFC3339Nano),
-				})
+			} else if change.Before != nil && propagates {
+				o.rows = append(o.rows, deletion)
 			}
 		}
 	case binlogdata.VEventType_VGTID:
@@ -167,6 +180,15 @@ func (o *orderedTransaction) commit() error {
 	if len(o.rows) > 0 && !snapshotChunk && o.pending.Position == o.committed.Position {
 		return fmt.Errorf("CDC rows have no advancing committed GTID")
 	}
+	// Snapshot rows share one version, so a delete among them could tie with the
+	// row it deletes. A real copy chunk never contains one.
+	if snapshotChunk {
+		for _, r := range o.rows {
+			if r.deletedAt != "" {
+				return fmt.Errorf("delete inside a snapshot chunk of %s; checkpoint retained", o.stream.Name)
+			}
+		}
+	}
 	for i, r := range o.rows {
 		phase := 0
 		ordinal := i + 1
@@ -201,11 +223,45 @@ func (o *orderedTransaction) commit() error {
 
 // Deletes need ordered CDC: the deletion must sort after every earlier version of
 // its row in the destination's dedup, and only _planetscale_order guarantees that.
-func validateDeletePropagation(psc PlanetScaleSource, table string) error {
+// The destination needs the primary key to find the row. When configured is set,
+// the stream comes from the configured catalog, which must carry the deletion
+// marker and the ordering field: without them the destination applies a delete as
+// an ordinary upsert, and the checkpoint moves past it for good.
+func validateDeletePropagation(psc PlanetScaleSource, stream Stream, configured bool) error {
 	if !psc.OrderedCDC {
-		return fmt.Errorf("delete propagation for %s requires ordered_cdc", table)
+		return fmt.Errorf("delete propagation for %s requires ordered_cdc", stream.Name)
+	}
+	if len(stream.PrimaryKeys) == 0 {
+		return fmt.Errorf("delete propagation for %s requires a primary key", stream.Name)
+	}
+	if configured {
+		for _, field := range []string{deletedAtField, orderingField} {
+			if _, ok := stream.Schema.Properties[field]; !ok {
+				return fmt.Errorf("delete propagation for %s: the configured catalog lacks %s; refresh the source schema and select it", stream.Name, field)
+			}
+		}
 	}
 	return nil
+}
+
+// Whether an update's before- and after-images have different primary keys.
+func (o *orderedTransaction) keyChanged(before, after *query.Row) (bool, error) {
+	record := func(row *query.Row) map[string]interface{} {
+		return QueryResultToRecords(sqltypes.Proto3ToResult(&query.QueryResult{Fields: o.fields, Rows: []*query.Row{row}}), &o.source)[0]
+	}
+	if len(o.stream.PrimaryKeys) == 0 {
+		return false, fmt.Errorf("cannot propagate deletes from %s: the stream has no primary key", o.stream.Name)
+	}
+	b, a := record(before), record(after)
+	for _, key := range o.stream.PrimaryKeys {
+		if len(key) != 1 {
+			return false, fmt.Errorf("cannot propagate deletes from %s: nested primary key %v", o.stream.Name, key)
+		}
+		if fmt.Sprint(b[key[0]]) != fmt.Sprint(a[key[0]]) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // The commit time of the binlog event, falling back to the read time for events

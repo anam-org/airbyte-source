@@ -33,6 +33,17 @@ type CustomSourceOptions struct {
 	DoNotTreatTinyIntAsBoolean bool `json:"do_not_treat_tiny_int_as_boolean"`
 }
 
+// DeleteTableNames lists the tables named in delete_propagation_tables.
+func (psc PlanetScaleSource) DeleteTableNames() []string {
+	var names []string
+	for _, name := range strings.Split(psc.DeleteTables, ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
 // PropagatesDeletes reports whether hard deletes in the named table are emitted
 // as _ab_cdc_deleted_at records instead of being dropped.
 func (psc PlanetScaleSource) PropagatesDeletes(table string) bool {

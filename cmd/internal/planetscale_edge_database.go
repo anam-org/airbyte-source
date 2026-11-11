@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -84,6 +85,13 @@ func (p PlanetScaleEdgeDatabase) DiscoverSchema(ctx context.Context, psc PlanetS
 		return c, errors.Wrap(err, "Unable to query database for schema")
 	}
 
+	// A misspelt or renamed table would otherwise silently drop deletes again.
+	for _, name := range psc.DeleteTableNames() {
+		if !slices.Contains(tables, name) {
+			return c, fmt.Errorf("delete_propagation_tables lists %s, which is not a table in %s", name, psc.Database)
+		}
+	}
+
 	for _, tableName := range tables {
 		stream, err := p.getStreamForTable(ctx, psc, tableName)
 		if err != nil {
@@ -138,7 +146,7 @@ func (p PlanetScaleEdgeDatabase) getStreamForTable(ctx context.Context, psc Plan
 		stream.DefaultCursorFields = []string{orderingField}
 	}
 	if psc.PropagatesDeletes(tableName) {
-		if err := validateDeletePropagation(psc, tableName); err != nil {
+		if err := validateDeletePropagation(psc, stream, false); err != nil {
 			return stream, err
 		}
 		if _, exists := stream.Schema.Properties[deletedAtField]; exists {
@@ -249,6 +257,11 @@ func (p PlanetScaleEdgeDatabase) Read(ctx context.Context, w io.Writer, ps Plane
 	}
 
 	table := s.Stream
+	if ps.PropagatesDeletes(table.Name) {
+		if err := validateDeletePropagation(ps, table, true); err != nil {
+			return currentSerializedCursor, err
+		}
+	}
 	timeout := 5 * time.Minute
 	if timeoutSeconds := ps.TimeoutSeconds; timeoutSeconds != nil {
 		timeout = time.Duration(*timeoutSeconds) * time.Second
@@ -273,12 +286,6 @@ func (p PlanetScaleEdgeDatabase) Read(ctx context.Context, w io.Writer, ps Plane
 			return currentSerializedCursor, err
 		}
 	}
-	if ps.PropagatesDeletes(table.Name) {
-		if err := validateDeletePropagation(ps, table.Name); err != nil {
-			return currentSerializedCursor, err
-		}
-	}
-
 	// the last synced VGTID is not after the current VGTID
 	if currentPosition.Position != "" && (!ps.OrderedCDC || currentPosition.LastKnownPk == nil) && !positionAfter(stopPosition, currentPosition.Position) {
 		p.Logger.Log(LOGLEVEL_INFO, preamble+"No new GTIDs found, exiting")
