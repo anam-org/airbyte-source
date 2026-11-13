@@ -20,6 +20,7 @@ type PlanetScaleSource struct {
 	UseReplica          bool                `json:"use_replica"`
 	UseRdonly           bool                `json:"use_rdonly"`
 	OrderedCDC          bool                `json:"ordered_cdc"`
+	DeleteTables        string              `json:"delete_propagation_tables"`
 	IncludeMetadata     bool                `json:"include_metadata"`
 	StartingGtids       string              `json:"starting_gtids"`
 	Options             CustomSourceOptions `json:"options"`
@@ -30,6 +31,28 @@ type PlanetScaleSource struct {
 
 type CustomSourceOptions struct {
 	DoNotTreatTinyIntAsBoolean bool `json:"do_not_treat_tiny_int_as_boolean"`
+}
+
+// DeleteTableNames lists the tables named in delete_propagation_tables.
+func (psc PlanetScaleSource) DeleteTableNames() []string {
+	var names []string
+	for _, name := range strings.Split(psc.DeleteTables, ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// PropagatesDeletes reports whether hard deletes in the named table are emitted
+// as _ab_cdc_deleted_at records instead of being dropped.
+func (psc PlanetScaleSource) PropagatesDeletes(table string) bool {
+	for _, name := range strings.Split(psc.DeleteTables, ",") {
+		if strings.TrimSpace(name) == table {
+			return true
+		}
+	}
+	return false
 }
 
 // DSN returns a DataSource that mysql libraries can use to connect to a PlanetScale database.
