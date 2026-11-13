@@ -149,8 +149,7 @@ func TestOrderingLimitCountsOnlyRetainedAfterImages(t *testing.T) {
 	b = &bytes.Buffer{}
 	tx = testTransaction(b, 10)
 	require.NoError(t, tx.accept(fields()))
-	tx.bytes = maxOrderedTransactionBytes
-	require.Error(t, tx.accept(row("too large")))
+	require.Error(t, tx.accept(row(strings.Repeat("x", maxOrderedTransactionBytes+1))))
 	require.Zero(t, b.Len())
 	require.Equal(t, pos(10), tx.committed.Position)
 }
