@@ -4,7 +4,7 @@ Opt-in `ordered_cdc` adds a string `_planetscale_order` column and discovers it 
 
 The version is a fixed-width tuple of MySQL56 GTID set cardinality, snapshot phase, and row ordinal within the committed transaction. A snapshot sorts after CDC at the same position. Snapshot rows use a constant ordinal so resuming at a different primary key or changing packet boundaries does not change their version. CDC row ordinals span response packets and distinguish repeated updates to one primary key within a transaction. Source timestamps are not used for ordering.
 
-Rows and pending positions are held until commit. An interrupted transaction emits no buffered rows and retains the previous committed checkpoint. Memory is capped at 64 MiB of serialized row events per transaction; oversized transactions fail rather than skip data. Source fields are retained with each buffered row. Existing optional metadata remains available.
+Rows and pending positions are held until commit. An interrupted transaction emits no buffered rows and retains the previous committed checkpoint. Memory is capped at 64 MiB of retained after-images per transaction; before-images are discarded and do not count. Oversized transactions fail rather than skip data. Source fields are retained with each buffered row. Existing optional metadata remains available.
 
 This candidate is restricted to the unsharded `-` shard. Successive positions must contain the previous GTID set. A new primary UUID is supported when its history extends the previous set; divergent or regressing histories and resharding fail. Deleted rows remain subject to the connector's existing behavior; this change does not implement deletion propagation.
 

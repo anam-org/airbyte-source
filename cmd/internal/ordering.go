@@ -16,6 +16,11 @@ import (
 )
 
 const orderingField = "_planetscale_order"
+
+// Bounds the after-images buffered for one transaction. Before-images are
+// discarded, so they do not count: a bulk scrub of large JSON columns carries
+// big before-images but small after-images (13 Nov 2026: a 4,974-row backfill
+// stalled engine_session for a day because its before-images passed 64 MiB).
 const maxOrderedTransactionBytes = 64 << 20
 
 // GTID set cardinality increases along one shard's replication history, including
@@ -76,17 +81,18 @@ func (o *orderedTransaction) accept(event *binlogdata.VEvent) error {
 		}
 		o.fields = event.FieldEvent.Fields
 	case binlogdata.VEventType_ROW:
-		o.bytes += proto.Size(event)
-		if o.bytes > maxOrderedTransactionBytes {
-			return fmt.Errorf("ordered transaction exceeds 64 MiB; checkpoint retained")
-		}
 		if len(o.fields) == 0 {
 			return fmt.Errorf("row before field metadata")
 		}
 		for _, change := range event.RowEvent.RowChanges {
-			if change.After != nil {
-				o.rows = append(o.rows, &query.QueryResult{Fields: o.fields, Rows: []*query.Row{change.After}})
+			if change.After == nil {
+				continue
 			}
+			o.bytes += proto.Size(change.After)
+			if o.bytes > maxOrderedTransactionBytes {
+				return fmt.Errorf("ordered transaction exceeds 64 MiB of retained rows; checkpoint retained")
+			}
+			o.rows = append(o.rows, &query.QueryResult{Fields: o.fields, Rows: []*query.Row{change.After}})
 		}
 	case binlogdata.VEventType_VGTID:
 		if len(event.GetVgtid().GetShardGtids()) != 1 {
