@@ -20,6 +20,12 @@ const orderingField = "_planetscale_order"
 // Airbyte's CDC deletion marker. In append-dedup mode the destination deletes the
 // row whose primary key a record carrying this field names.
 const deletedAtField = "_ab_cdc_deleted_at"
+
+// Bounds the rows buffered for one transaction: after-images, and for a delete the
+// key-only record it becomes. Discarded before-images do not count: a bulk scrub
+// of large JSON columns carries big before-images but small after-images (13 Nov
+// 2026: a 4,974-row backfill stalled engine_session for a day because its
+// before-images passed 64 MiB).
 const maxOrderedTransactionBytes = 64 << 20
 
 // GTID set cardinality increases along one shard's replication history, including
@@ -56,9 +62,11 @@ func transactionRank(position string) (uint64, error) {
 
 // A row version held until its transaction commits. deletedAt is set for a
 // hard delete, whose row is the before-image.
+// A row version held until its transaction commits: an after-image, or for a
+// delete the key-only record that replaces it.
 type orderedRow struct {
-	result    *query.QueryResult
-	deletedAt string
+	result   *query.QueryResult
+	deletion map[string]interface{}
 }
 
 type orderedTransaction struct {
@@ -87,34 +95,37 @@ func (o *orderedTransaction) accept(event *binlogdata.VEvent) error {
 		}
 		o.fields = event.FieldEvent.Fields
 	case binlogdata.VEventType_ROW:
-		o.bytes += proto.Size(event)
-		if o.bytes > maxOrderedTransactionBytes {
-			return fmt.Errorf("ordered transaction exceeds 64 MiB; checkpoint retained")
-		}
 		if len(o.fields) == 0 {
 			return fmt.Errorf("row before field metadata")
 		}
 		propagates := o.source.PropagatesDeletes(o.stream.Name)
 		for _, change := range event.RowEvent.RowChanges {
-			deletion := orderedRow{
-				result:    &query.QueryResult{Fields: o.fields, Rows: []*query.Row{change.Before}},
-				deletedAt: eventTime(event).UTC().Format(time.RFC3339Nano),
-			}
-			if change.After != nil {
-				// An update that moves a row to a new primary key leaves the old key's
-				// row in the destination unless the old key is deleted first.
-				if propagates && change.Before != nil {
-					moved, err := o.keyChanged(change.Before, change.After)
-					if err != nil {
-						return err
-					}
-					if moved {
-						o.rows = append(o.rows, deletion)
-					}
+			deleteBefore := propagates && change.Before != nil && change.After == nil
+			// An update that moves a row to a new primary key leaves the old key's
+			// row in the destination unless the old key is deleted first.
+			if propagates && change.Before != nil && change.After != nil {
+				moved, err := o.keyChanged(change.Before, change.After)
+				if err != nil {
+					return err
 				}
-				o.rows = append(o.rows, orderedRow{result: &query.QueryResult{Fields: o.fields, Rows: []*query.Row{change.After}}})
-			} else if change.Before != nil && propagates {
-				o.rows = append(o.rows, deletion)
+				deleteBefore = moved
+			}
+			// A delete is reduced to its key-only record now, so its before-image
+			// is not buffered: deleting many large rows cannot hit the cap.
+			if deleteBefore {
+				deletion, err := o.deletion(change.Before, eventTime(event))
+				if err != nil {
+					return err
+				}
+				if err := o.retain(orderedRow{deletion: deletion}, deletionSize(deletion)); err != nil {
+					return err
+				}
+			}
+			if change.After == nil {
+				continue
+			}
+			if err := o.retain(orderedRow{result: &query.QueryResult{Fields: o.fields, Rows: []*query.Row{change.After}}}, proto.Size(change.After)); err != nil {
+				return err
 			}
 		}
 	case binlogdata.VEventType_VGTID:
@@ -184,7 +195,7 @@ func (o *orderedTransaction) commit() error {
 	// row it deletes. A real copy chunk never contains one.
 	if snapshotChunk {
 		for _, r := range o.rows {
-			if r.deletedAt != "" {
+			if r.deletion != nil {
 				return fmt.Errorf("delete inside a snapshot chunk of %s; checkpoint retained", o.stream.Name)
 			}
 		}
@@ -198,13 +209,11 @@ func (o *orderedTransaction) commit() error {
 			phase = 1
 			ordinal = 0
 		}
-		for _, record := range QueryResultToRecords(sqltypes.Proto3ToResult(r.result), &o.source) {
-			if r.deletedAt != "" {
-				var err error
-				if record, err = deletionRecord(record, o.stream, r.deletedAt); err != nil {
-					return err
-				}
-			}
+		records := []map[string]interface{}{r.deletion}
+		if r.deletion == nil {
+			records = QueryResultToRecords(sqltypes.Proto3ToResult(r.result), &o.source)
+		}
+		for _, record := range records {
 			record[orderingField] = fmt.Sprintf("%020d:%d:%020d", rank, phase, ordinal)
 			if o.source.IncludeMetadata {
 				record["_planetscale_metadata"] = map[string]interface{}{"vgtid_position": o.pending.Position, "extracted_at": time.Now().UnixNano(), "sequence_number": i + 1}
@@ -242,6 +251,31 @@ func validateDeletePropagation(psc PlanetScaleSource, stream Stream, configured 
 		}
 	}
 	return nil
+}
+
+// Buffers one row for commit, counting size toward the transaction cap.
+func (o *orderedTransaction) retain(row orderedRow, size int) error {
+	o.bytes += size
+	if o.bytes > maxOrderedTransactionBytes {
+		return fmt.Errorf("ordered transaction exceeds 64 MiB of retained rows; checkpoint retained")
+	}
+	o.rows = append(o.rows, row)
+	return nil
+}
+
+// The key-only deletion record for a before-image.
+func (o *orderedTransaction) deletion(before *query.Row, at time.Time) (map[string]interface{}, error) {
+	row := QueryResultToRecords(sqltypes.Proto3ToResult(&query.QueryResult{Fields: o.fields, Rows: []*query.Row{before}}), &o.source)[0]
+	return deletionRecord(row, o.stream, at.UTC().Format(time.RFC3339Nano))
+}
+
+// What a deletion record holds in memory, roughly: its keys and values.
+func deletionSize(record map[string]interface{}) int {
+	size := 0
+	for key, value := range record {
+		size += len(key) + len(fmt.Sprint(value))
+	}
+	return size
 }
 
 // Whether an update's before- and after-images have different primary keys.

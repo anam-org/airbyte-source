@@ -3,6 +3,7 @@ package internal
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 
 	psdbconnect "github.com/planetscale/airbyte-source/proto/psdbconnect/v1alpha1"
@@ -54,10 +55,8 @@ func TestOrderedDeleteIsDroppedForTablesNotOptedIn(t *testing.T) {
 func TestOrderedDeleteWithoutPrimaryKeyFailsWithoutAdvancing(t *testing.T) {
 	b := &bytes.Buffer{}
 	tx := newOrderedTransaction(&psdbconnect.TableCursor{Keyspace: "db", Shard: "-", Position: pos(10)}, NewLogger(b), PlanetScaleSource{OrderedCDC: true, DeleteTables: "users"}, Stream{Name: "users", Namespace: "db"})
-	for _, e := range []*binlogdata.VEvent{fields(), deleteRow("assessed", 1), vgtid(11, nil)} {
-		require.NoError(t, tx.accept(e))
-	}
-	require.Error(t, tx.accept(commitEvent()))
+	require.NoError(t, tx.accept(fields()))
+	require.ErrorContains(t, tx.accept(deleteRow("assessed", 1)), "no primary key")
 	require.Equal(t, pos(10), tx.committed.Position)
 	require.Empty(t, decodeRecords(t, b))
 }
@@ -195,4 +194,22 @@ func TestDiscoveryRejectsUnknownDeleteTables(t *testing.T) {
 	catalog, err := p.DiscoverSchema(context.Background(), PlanetScaleSource{Database: "db", OrderedCDC: true, DeleteTables: " users ,"})
 	require.NoError(t, err)
 	require.Contains(t, catalog.Streams[0].Schema.Properties, deletedAtField)
+}
+
+func TestOrderedDeletesBufferOnlyTheirKeys(t *testing.T) {
+	b := &bytes.Buffer{}
+	tx := deleteTransaction(b, PlanetScaleSource{DeleteTables: "users"})
+	huge := strings.Repeat("x", maxOrderedTransactionBytes/2)
+	require.NoError(t, tx.accept(fields()))
+	// Three deletes whose before-images together pass the cap: a bulk erasure of large
+	// rows must not stall the stream the way the 12 Nov scrub did.
+	for i := 0; i < 3; i++ {
+		require.NoError(t, tx.accept(deleteRow(huge, 1)))
+	}
+	require.Less(t, tx.bytes, 1024)
+	require.NoError(t, tx.accept(vgtid(11, nil)))
+	require.NoError(t, tx.accept(commitEvent()))
+	records := decodeRecords(t, b)
+	require.Len(t, records, 3)
+	require.NotContains(t, records[0].Data, "status")
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	psdbconnect "github.com/planetscale/airbyte-source/proto/psdbconnect/v1alpha1"
@@ -120,6 +121,39 @@ func TestOrderingRejectsDivergenceAndOversizedTransactions(t *testing.T) {
 	require.Zero(t, b.Len())
 	require.Error(t, tx.accept(&binlogdata.VEvent{Type: binlogdata.VEventType_JOURNAL}))
 }
+func TestOrderingLimitCountsOnlyRetainedAfterImages(t *testing.T) {
+	b := &bytes.Buffer{}
+	tx := testTransaction(b, 10)
+	require.NoError(t, tx.accept(fields()))
+	// A bulk scrub: large before-images that are discarded, small after-images.
+	before := strings.Repeat("x", 1<<20)
+	for i := 0; i < 100; i++ {
+		e := row("ok")
+		e.RowEvent.RowChanges[0].Before = &query.Row{Lengths: []int64{1, int64(len(before))}, Values: []byte("1" + before)}
+		require.NoError(t, tx.accept(e))
+	}
+	require.Less(t, tx.bytes, 1<<20)
+	require.NoError(t, tx.accept(vgtid(11, nil)))
+	require.NoError(t, tx.accept(commitEvent()))
+	require.Len(t, decodeRecords(t, b), 100)
+	require.Equal(t, pos(11), tx.committed.Position)
+
+	// Deletes have no after-image and retain nothing.
+	tx = testTransaction(&bytes.Buffer{}, 10)
+	require.NoError(t, tx.accept(fields()))
+	require.NoError(t, tx.accept(&binlogdata.VEvent{Type: binlogdata.VEventType_ROW, RowEvent: &binlogdata.RowEvent{
+		RowChanges: []*binlogdata.RowChange{{Before: &query.Row{Lengths: []int64{1, 1}, Values: []byte("1x")}}}}}))
+	require.Zero(t, tx.bytes)
+
+	// Large after-images still stop the transaction without emitting.
+	b = &bytes.Buffer{}
+	tx = testTransaction(b, 10)
+	require.NoError(t, tx.accept(fields()))
+	require.Error(t, tx.accept(row(strings.Repeat("x", maxOrderedTransactionBytes+1))))
+	require.Zero(t, b.Len())
+	require.Equal(t, pos(10), tx.committed.Position)
+}
+
 func TestTransactionRankIncludesAllServersAndIntervals(t *testing.T) {
 	rank, err := transactionRank("MySQL56/" + testSID + ":1-9:12-14,aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-2")
 	require.NoError(t, err)
