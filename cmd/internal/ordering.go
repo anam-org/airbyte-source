@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 	"strconv"
@@ -60,8 +61,6 @@ func transactionRank(position string) (uint64, error) {
 	return count, nil
 }
 
-// A row version held until its transaction commits. deletedAt is set for a
-// hard delete, whose row is the before-image.
 // A row version held until its transaction commits: an after-image, or for a
 // delete the key-only record that replaces it.
 type orderedRow struct {
@@ -269,9 +268,10 @@ func (o *orderedTransaction) deletion(before *query.Row, at time.Time) (map[stri
 	return deletionRecord(row, o.stream, at.UTC().Format(time.RFC3339Nano))
 }
 
-// What a deletion record holds in memory, roughly: its keys and values.
+// What a deletion record holds in memory, roughly: a fixed cost for the map, its
+// boxed values and the timestamp (about 450 bytes measured), plus its keys and values.
 func deletionSize(record map[string]interface{}) int {
-	size := 0
+	size := 512
 	for key, value := range record {
 		size += len(key) + len(fmt.Sprint(value))
 	}
@@ -322,6 +322,11 @@ func deletionRecord(row map[string]interface{}, stream Stream, deletedAt string)
 		value, ok := row[key[0]]
 		if !ok || value == nil {
 			return nil, fmt.Errorf("cannot propagate a delete from %s: before-image lacks primary key %s", stream.Name, key[0])
+		}
+		// A parsed value is a slice of the whole before-image. Copy it, or the
+		// buffered record keeps every deleted row's content alive in memory.
+		if v, ok := value.(sqltypes.Value); ok {
+			value = sqltypes.MakeTrusted(v.Type(), bytes.Clone(v.Raw()))
 		}
 		record[key[0]] = value
 	}

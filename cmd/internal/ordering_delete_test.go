@@ -9,6 +9,7 @@ import (
 	psdbconnect "github.com/planetscale/airbyte-source/proto/psdbconnect/v1alpha1"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"vitess.io/vitess/go/sqltypes"
 	"vitess.io/vitess/go/vt/proto/binlogdata"
 	"vitess.io/vitess/go/vt/proto/query"
 	"vitess.io/vitess/go/vt/proto/vtgate"
@@ -206,10 +207,45 @@ func TestOrderedDeletesBufferOnlyTheirKeys(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		require.NoError(t, tx.accept(deleteRow(huge, 1)))
 	}
-	require.Less(t, tx.bytes, 1024)
+	require.Less(t, tx.bytes, 3*1024)
+	// What is buffered must really be small, not a slice of the before-image.
+	for _, r := range tx.rows {
+		require.Less(t, cap(r.deletion["id"].(sqltypes.Value).Raw()), 1024)
+	}
 	require.NoError(t, tx.accept(vgtid(11, nil)))
 	require.NoError(t, tx.accept(commitEvent()))
 	records := decodeRecords(t, b)
 	require.Len(t, records, 3)
+	require.NotContains(t, records[0].Data, "status")
+}
+
+func TestOrderedDeletesCountTowardTheCap(t *testing.T) {
+	tx := deleteTransaction(&bytes.Buffer{}, PlanetScaleSource{DeleteTables: "users"})
+	require.NoError(t, tx.accept(fields()))
+	require.NoError(t, tx.accept(row(strings.Repeat("x", maxOrderedTransactionBytes-300))))
+	require.ErrorContains(t, tx.accept(deleteRow("assessed", 1)), "exceeds 64 MiB")
+}
+
+func TestOrderedRollbackDropsBufferedDeletes(t *testing.T) {
+	b := &bytes.Buffer{}
+	tx := deleteTransaction(b, PlanetScaleSource{DeleteTables: "users"})
+	for _, e := range []*binlogdata.VEvent{fields(), deleteRow("assessed", 1), vgtid(11, nil), {Type: binlogdata.VEventType_ROLLBACK}} {
+		require.NoError(t, tx.accept(e))
+	}
+	require.Empty(t, tx.rows)
+	require.Zero(t, tx.bytes)
+	require.Equal(t, pos(10), tx.committed.Position)
+	require.Empty(t, decodeRecords(t, b))
+}
+
+func TestOrderedDeletionRecordsCarryMetadataWhenEnabled(t *testing.T) {
+	b := &bytes.Buffer{}
+	tx := deleteTransaction(b, PlanetScaleSource{DeleteTables: "users", IncludeMetadata: true})
+	for _, e := range []*binlogdata.VEvent{fields(), deleteRow("assessed", 1), vgtid(11, nil), commitEvent()} {
+		require.NoError(t, tx.accept(e))
+	}
+	records := decodeRecords(t, b)
+	require.Len(t, records, 1)
+	require.Contains(t, records[0].Data, "_planetscale_metadata")
 	require.NotContains(t, records[0].Data, "status")
 }
